@@ -1,5 +1,6 @@
-use git2::{BranchType, Error, Repository, StatusOptions, StatusShow};
+use git2::{BranchType, Error, Repository};
 use std::process;
+use std::process::Command;
 
 fn main() {
     let repo = match Repository::open(".") {
@@ -14,13 +15,13 @@ fn main() {
         components.push(branch_name);
     }
 
-    // Get upstream branch name and add it to components if present
+    //// Get upstream branch name and add it to components if present
     if let Ok(upstream_name) = get_upstream_branch_name(&repo) {
         components.push(upstream_name);
     }
 
     // Get git status message and add it to components if present
-    let status_message = get_git_status(&repo);
+    let status_message = get_git_status();
     if !status_message.is_empty() {
         components.push(status_message);
     }
@@ -48,29 +49,33 @@ fn get_upstream_branch_name(repo: &Repository) -> Result<String, Error> {
     Ok(upstream_name.to_string())
 }
 
-fn get_git_status(repo: &Repository) -> String {
-    let mut opts = StatusOptions::new();
-    opts.include_untracked(false) // Equivalent to -uno flag
-        .show(StatusShow::IndexAndWorkdir);
+fn get_git_status() -> String {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "-uno"])
+        .output();
 
-    let statuses = match repo.statuses(Some(&mut opts)) {
-        Ok(statuses) => statuses,
-        Err(_) => return "Failed to get status".to_string(),
-    };
-
-    construct_git_status(&statuses)
+    match output {
+        Ok(output) => {
+            if output.stdout.is_empty() {
+                "✓".to_string()
+            } else {
+                parse_git_status_output(String::from_utf8_lossy(&output.stdout))
+            }
+        },
+        Err(_) => "Failed to get status".to_string(),
+    }
 }
 
-fn construct_git_status(statuses: &git2::Statuses) -> String {
+fn parse_git_status_output(output: std::borrow::Cow<str>) -> String {
     let mut updated = 0;
     let mut deleted = 0;
     let mut untracked = 0;
 
-    for entry in statuses.iter() {
-        match entry.status() {
-            s if s.contains(git2::Status::WT_MODIFIED) => updated += 1,
-            s if s.contains(git2::Status::WT_DELETED) => deleted += 1,
-            s if s.contains(git2::Status::WT_NEW) => untracked += 1,
+    for line in output.lines() {
+        match &line[0..2] {
+            " M" => updated += 1,
+            " D" => deleted += 1,
+            "??" => untracked += 1,
             _ => {}
         }
     }
@@ -91,4 +96,3 @@ fn construct_git_status(statuses: &git2::Statuses) -> String {
 
     message
 }
-
