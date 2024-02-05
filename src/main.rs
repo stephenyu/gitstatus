@@ -6,7 +6,6 @@ fn main() {
     let repo = match Repository::discover(".") {
         Ok(repo) => repo,
         Err(_) => {
-            println!("No Git repository found.");
             process::exit(1); // Exit with a non-zero status to indicate failure
         }
     };
