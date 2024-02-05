@@ -3,9 +3,12 @@ use std::process;
 use std::process::Command;
 
 fn main() {
-    let repo = match Repository::open(".") {
+    let repo = match Repository::discover(".") {
         Ok(repo) => repo,
-        Err(_) => process::exit(0), // Exit if the repository cannot be opened
+        Err(_) => {
+            println!("No Git repository found.");
+            process::exit(1); // Exit with a non-zero status to indicate failure
+        }
     };
 
     let mut components = Vec::new();
@@ -61,7 +64,7 @@ fn get_git_status() -> String {
             } else {
                 parse_git_status_output(String::from_utf8_lossy(&output.stdout))
             }
-        },
+        }
         Err(_) => "Failed to get status".to_string(),
     }
 }
