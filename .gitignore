@@ -3,3 +3,4 @@
 
 # Generated files
 Cargo.lock
+.DS_Store

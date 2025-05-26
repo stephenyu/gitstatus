@@ -1,12 +1,15 @@
 [package]
 name = "gitstatus"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "Does one thing incredibly well: tells you your current branch, origin branch and the number of changes. Perfect for large repositories / monorepos"
 license = "GPL-3.0-only"
 repository = "https://github.com/stephenyu/gitstatus"
+rust-version = "1.70"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-git2 = "0.19.0"
+git2 = "0.20"
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
