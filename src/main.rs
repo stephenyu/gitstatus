@@ -62,8 +62,9 @@ struct ChangesSummary {
 
 impl GitStatus {
     fn from_repository(repo: &Repository) -> Result<Self> {
-        let current_branch = get_current_branch_name(repo)?;
-        let upstream_branch = get_upstream_branch_name(repo).ok();
+        let head = repo.head().ok();
+        let current_branch = get_current_branch_name(repo, head.as_ref())?;
+        let upstream_branch = get_upstream_branch_name(repo, head.as_ref()).ok();
         let changes = get_changes_summary(repo)?;
 
         Ok(GitStatus {
@@ -129,39 +130,51 @@ impl ChangesSummary {
     }
 }
 
-fn get_current_branch_name(repo: &Repository) -> Result<String> {
-    let head = repo.head().context("Failed to get HEAD reference")?;
-
-    if head.is_branch() {
-        let shorthand = head.shorthand().context("Failed to get branch shorthand")?;
-        Ok(shorthand.to_string())
-    } else {
-        Ok("HEAD".to_string()) // Detached HEAD state
+fn get_current_branch_name(_repo: &Repository, head: Option<&git2::Reference>) -> Result<String> {
+    match head {
+        Some(head_ref) => {
+            if head_ref.is_branch() {
+                let shorthand = head_ref.shorthand().context("Failed to get branch shorthand")?;
+                Ok(shorthand.to_string())
+            } else {
+                Ok("HEAD".to_string()) // Detached HEAD state
+            }
+        }
+        None => {
+            // Repository has no HEAD (empty repository)
+            Ok("(no branch)".to_string())
+        }
     }
 }
 
-fn get_upstream_branch_name(repo: &Repository) -> Result<String> {
-    let head = repo.head().context("Failed to get HEAD reference")?;
+fn get_upstream_branch_name(repo: &Repository, head: Option<&git2::Reference>) -> Result<String> {
+    match head {
+        Some(head_ref) => {
+            let branch_name = head_ref.shorthand().context("Failed to get branch name")?;
 
-    let branch_name = head.shorthand().context("Failed to get branch name")?;
+            let branch = repo
+                .find_branch(branch_name, BranchType::Local)
+                .context("Failed to find local branch")?;
 
-    let branch = repo
-        .find_branch(branch_name, BranchType::Local)
-        .context("Failed to find local branch")?;
+            let upstream = branch.upstream().context("No upstream branch configured")?;
 
-    let upstream = branch.upstream().context("No upstream branch configured")?;
+            let upstream_name = upstream
+                .name()
+                .context("Failed to get upstream branch name")?
+                .context("Upstream branch name contains invalid UTF-8")?;
 
-    let upstream_name = upstream
-        .name()
-        .context("Failed to get upstream branch name")?
-        .context("Upstream branch name contains invalid UTF-8")?;
-
-    Ok(upstream_name.to_string())
+            Ok(upstream_name.to_string())
+        }
+        None => {
+            Err(anyhow::anyhow!("No HEAD reference available"))
+        }
+    }
 }
 
 fn get_changes_summary(repo: &Repository) -> Result<ChangesSummary> {
     let mut opts = git2::StatusOptions::new();
-    opts.include_untracked(false) // Only tracked files
+    opts.include_untracked(true)        // Show untracked files
+        .recurse_untracked_dirs(false)  // But don't scan inside untracked dirs
         .include_ignored(false);
 
     let statuses = repo
