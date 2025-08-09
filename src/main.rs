@@ -164,18 +164,43 @@ fn get_current_branch_name(repo: &Repository) -> Result<String> {
 }
 
 fn get_upstream_branch_name(repo: &Repository) -> Result<String> {
+    // Resolve current HEAD to obtain the local branch reference name
     let head = repo.head()?;
-    let tracking_branch = head.into_remote(gix::remote::Direction::Fetch).transpose()?;
+    let local_ref_name = match head.referent_name() {
+        Some(name) => name,
+        None => {
+            // Detached or unborn HEAD: no upstream
+            return Err(anyhow::anyhow!(
+                "No upstream branch configured for current branch"
+            ));
+        }
+    };
 
-    match tracking_branch {
-        Some(branch) => match branch.name() {
-            Some(name) => Ok(name.as_bstr().to_string()),
-            None => Err(anyhow::anyhow!("Upstream branch name is not valid UTF-8")),
-        },
-        None => Err(anyhow::anyhow!(
-            "No upstream branch configured for current branch"
-        )),
-    }
+    // Determine the configured remote name for fetch operations, e.g., "origin"
+    let remote_name = match repo.branch_remote_name(local_ref_name.shorten(), gix::remote::Direction::Fetch) {
+        Some(name) => name.as_bstr().to_string(),
+        None => {
+            return Err(anyhow::anyhow!(
+                "No upstream branch configured for current branch"
+            ));
+        }
+    };
+
+    // Determine the upstream branch ref name on the remote, e.g., "refs/heads/main"
+    let upstream_ref = match repo.branch_remote_ref_name(local_ref_name, gix::remote::Direction::Fetch) {
+        Some(Ok(name)) => name,
+        Some(Err(_)) | None => {
+            return Err(anyhow::anyhow!(
+                "No upstream branch configured for current branch"
+            ));
+        }
+    };
+
+    // Shorten to branch name like "main" from "refs/heads/main"
+    let short_upstream = upstream_ref.shorten().to_string();
+    let branch_only = short_upstream.strip_prefix("heads/").unwrap_or(&short_upstream);
+
+    Ok(format!("{}/{}", remote_name, branch_only))
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
