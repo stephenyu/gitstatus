@@ -4,7 +4,7 @@ A fast, modern Rust tool that provides concise git repository status information
 
 ## Features
 
-- **Fast**: Pure Rust implementation using libgit2
+- **Fast**: Pure Rust implementation using `gix` (Gitoxide)
 - **Concise**: Shows branch, upstream, and change summary in minimal format
 - **Modern**: Built with modern Rust patterns and best practices
 - **Safe**: Proper error handling and memory safety
@@ -102,14 +102,14 @@ This version represents a complete modernization of the codebase:
 
 ### 🏗️ **Improved Architecture**
 - **Separation of Concerns**: Clear separation between data collection, processing, and output
-- **Pure libgit2**: Eliminated external `git` command calls for better performance
-- **Structured Status**: Uses git2's native status API instead of parsing porcelain output
+- **Pure `gix`**: Eliminated external `git` command calls in favor of `gix` (Gitoxide)
+- **Structured Status**: Uses `gix::status` platform and `tree_index_status()` for precise, fast diffs
 - **Extensible Design**: Easy to add new features and status indicators
 
 ### ⚡ **Performance Improvements**
-- **Native Git Access**: Direct libgit2 usage is faster than spawning processes
-- **Efficient Status Checking**: Only checks tracked files by default
-- **Minimal Allocations**: Reduced string allocations and copying
+- **Fast default**: Avoid scanning untracked files by default (equivalent to `git -uno`)
+- **Parallel checks**: Uses `gix` parallel feature to check tracked-file modifications efficiently
+- **Minimal I/O**: No process spawning; tracked-only checks for prompt use are extremely fast
 
 ### 🛡️ **Reliability**
 - **Proper Error Propagation**: No more silent failures with `process::exit(1)`
@@ -121,6 +121,18 @@ This version represents a complete modernization of the codebase:
 - **Verbose Mode**: Optional detailed error messages for debugging
 - **Flexible Paths**: Can check status of any repository, not just current directory
 - **Help System**: Proper help and version information
+
+## How it’s fast (with gix)
+
+By default, `gitstatus` is optimized for shell prompts and large repos:
+
+- It compares `HEAD^{tree}` to the index for staged changes using `Repository::tree_index_status()`.
+- It compares the index to the working tree using `Repository::status(...).into_index_worktree_iter(...)` with untracked disabled unless requested.
+- Untracked mode mapping:
+  - default / `-u no`: no untracked scan (no dirwalk)
+  - `-u normal`: collapsed untracked
+  - `-u all` or `--all`: full untracked listing
+- Submodule checks and rename tracking are disabled by default for speed; they can be enabled later if needed.
 
 ## Development
 
