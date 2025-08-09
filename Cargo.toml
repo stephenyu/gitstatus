@@ -10,7 +10,7 @@ rust-version = "1.70"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-gix = { version = "0.73.0", features = ["status"] }
+gix = { version = "0.73.0", features = ["status", "parallel"] }
 anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
 bstr = "1.0"

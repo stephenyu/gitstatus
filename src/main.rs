@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
+use gix::diff::index::{Action, ChangeRef};
+use gix::progress;
+use gix::status::{self, index_worktree::iter::Summary as IterSummary, UntrackedFiles};
 use gix::Repository;
 use std::path::Path;
 
@@ -184,54 +187,64 @@ enum UntrackedArg {
 
 fn get_changes_summary(repo: &Repository, untracked: Option<UntrackedArg>, all: bool) -> Result<ChangesSummary> {
     let mut summary = ChangesSummary::default();
-    
-    // Use git command to get proper staged vs unstaged distinction
-    let repo_path = repo.workdir().unwrap_or(repo.path());
-    let output = std::process::Command::new("git")
-        .current_dir(repo_path)
-        .args(&["status", "--porcelain"])
-        .output()
-        .context("Failed to execute git status")?;
-    
-    if !output.status.success() {
-        return Ok(summary);
+
+    // 1) Count staged changes: diff HEAD tree vs index
+    if let Ok(head_tree_id) = repo.head_tree_id() {
+        let worktree_index = repo.index_or_empty()?;
+        let _ = repo.tree_index_status::<anyhow::Error>(
+            &head_tree_id,
+            &worktree_index,
+            None,
+            status::tree_index::TrackRenames::Disabled,
+            |change, _tree_idx, _work_idx| {
+                match change {
+                    ChangeRef::Addition { .. } => summary.staged += 1,
+                    ChangeRef::Modification { .. } => summary.staged += 1,
+                    ChangeRef::Deletion { .. } => summary.staged += 1,
+                    ChangeRef::Rewrite { .. } => summary.staged += 1,
+                }
+                Ok(Action::Continue)
+            },
+        );
     }
-    
-    let status_output = String::from_utf8_lossy(&output.stdout);
-    
-    for line in status_output.lines() {
-        if line.len() < 2 {
-            continue;
-        }
-        
-        let chars: Vec<char> = line.chars().collect();
-        let index_status = chars[0];
-        let worktree_status = chars[1];
-        
-        // Count staged changes (index status is not space or ?)
-        match index_status {
-            'A' | 'M' | 'D' | 'R' | 'C' => summary.staged += 1,
-            _ => {}
-        }
-        
-        // Count working directory changes
-        match worktree_status {
-            'M' => summary.modified += 1,
-            'D' => summary.deleted += 1,
-            _ => {}
-        }
-        
-        // Count untracked files (both index and worktree status are ?)
-        if index_status == '?' && worktree_status == '?' {
-            let should_include_untracked = match untracked {
-                Some(UntrackedArg::No) => false,
-                Some(UntrackedArg::Normal) | Some(UntrackedArg::All) => true,
-                None => all,
-            };
-            
-            if should_include_untracked {
-                summary.untracked += 1;
+
+    // 2) Count working tree changes: diff index vs worktree (tracked files only by default)
+    let include_untracked_mode = match untracked {
+        Some(UntrackedArg::No) => UntrackedFiles::None,
+        Some(UntrackedArg::Normal) => UntrackedFiles::Collapsed,
+        Some(UntrackedArg::All) => UntrackedFiles::Files,
+        None => if all { UntrackedFiles::Files } else { UntrackedFiles::None },
+    };
+
+    let mut platform = repo
+        .status(progress::Discard)?
+        .index_worktree_rewrites(None)
+        .index_worktree_submodules(None);
+
+    platform = match include_untracked_mode {
+        UntrackedFiles::None => platform.index_worktree_options_mut(|opts| {
+            // Disable dirwalk entirely for maximum speed.
+            opts.dirwalk_options = None;
+        }),
+        other => platform.untracked_files(other),
+    };
+
+    let mut iter = platform.into_index_worktree_iter(Vec::new())?;
+    while let Some(item_res) = iter.next() {
+        let Ok(item) = item_res else { break };
+        match item.summary() {
+            Some(IterSummary::Added) => summary.untracked += 1,
+            Some(IterSummary::Removed) => summary.deleted += 1,
+            Some(IterSummary::Modified) | Some(IterSummary::TypeChange) | Some(IterSummary::Conflict) => {
+                summary.modified += 1
             }
+            Some(IterSummary::Renamed) => summary.renamed += 1,
+            Some(IterSummary::Copied) => {
+                // Treat copies similar to renames for summary purposes
+                summary.renamed += 1
+            }
+            Some(IterSummary::IntentToAdd) => summary.staged += 1,
+            None => {}
         }
     }
 
