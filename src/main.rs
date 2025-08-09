@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use clap::Parser;
-use git2::{BranchType, Repository, Status};
+use clap::{Parser, ValueEnum};
+use gix::Repository;
 use std::path::Path;
 
 #[derive(Parser)]
@@ -17,6 +17,15 @@ struct Args {
     /// Show detailed output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Control untracked files handling (e.g., -uno == --untracked no)
+    /// Values: no | normal | all
+    #[arg(short = 'u', long = "untracked", value_enum)]
+    untracked: Option<UntrackedArg>,
+
+    /// Show all files including untracked files (overrides default behavior)
+    #[arg(long)]
+    all: bool,
 }
 
 fn main() {
@@ -36,12 +45,12 @@ fn main() {
 fn run(args: &Args) -> Result<String> {
     let repo = discover_repository(&args.path).context("Failed to find git repository")?;
 
-    let status = GitStatus::from_repository(&repo)?;
+    let status = GitStatus::from_repository(&repo, args.untracked, args.all)?;
     Ok(status.format())
 }
 
 fn discover_repository(path: &str) -> Result<Repository> {
-    Repository::discover(Path::new(path)).context("Not a git repository or unable to access")
+    gix::discover(Path::new(path)).context("Not a git repository or unable to access")
 }
 
 #[derive(Debug)]
@@ -53,19 +62,18 @@ struct GitStatus {
 
 #[derive(Debug, Default)]
 struct ChangesSummary {
+    staged: usize,
     modified: usize,
     deleted: usize,
-    added: usize,
     renamed: usize,
-    typechange: usize,
+    untracked: usize,
 }
 
 impl GitStatus {
-    fn from_repository(repo: &Repository) -> Result<Self> {
-        let head = repo.head().ok();
-        let current_branch = get_current_branch_name(repo, head.as_ref())?;
-        let upstream_branch = get_upstream_branch_name(repo, head.as_ref()).ok();
-        let changes = get_changes_summary(repo)?;
+    fn from_repository(repo: &Repository, untracked: Option<UntrackedArg>, all: bool) -> Result<Self> {
+        let current_branch = get_current_branch_name(repo)?;
+        let upstream_branch = get_upstream_branch_name(repo).ok();
+        let changes = get_changes_summary(repo, untracked, all)?;
 
         Ok(GitStatus {
             current_branch,
@@ -96,11 +104,11 @@ impl GitStatus {
 
 impl ChangesSummary {
     fn is_clean(&self) -> bool {
-        self.modified == 0
+        self.staged == 0
+            && self.modified == 0
             && self.deleted == 0
-            && self.added == 0
             && self.renamed == 0
-            && self.typechange == 0
+            && self.untracked == 0
     }
 
     fn format(&self) -> String {
@@ -110,8 +118,11 @@ impl ChangesSummary {
 
         let mut parts = Vec::new();
 
-        if self.added > 0 {
-            parts.push(format!("+{}", self.added));
+        if self.staged > 0 {
+            parts.push(format!("^{}", self.staged));
+        }
+        if self.renamed > 0 {
+            parts.push(format!("~{}", self.renamed));
         }
         if self.modified > 0 {
             parts.push(format!("~{}", self.modified));
@@ -119,87 +130,108 @@ impl ChangesSummary {
         if self.deleted > 0 {
             parts.push(format!("-{}", self.deleted));
         }
-        if self.renamed > 0 {
-            parts.push(format!("r{}", self.renamed));
-        }
-        if self.typechange > 0 {
-            parts.push(format!("t{}", self.typechange));
+        if self.untracked > 0 {
+            parts.push(format!("+{}", self.untracked));
         }
 
         parts.join("")
     }
 }
 
-fn get_current_branch_name(_repo: &Repository, head: Option<&git2::Reference>) -> Result<String> {
-    match head {
-        Some(head_ref) => {
-            if head_ref.is_branch() {
-                let shorthand = head_ref.shorthand().context("Failed to get branch shorthand")?;
-                Ok(shorthand.to_string())
-            } else {
-                Ok("HEAD".to_string()) // Detached HEAD state
+fn get_current_branch_name(repo: &Repository) -> Result<String> {
+    match repo.head() {
+        Ok(head_ref) => {
+            match head_ref.referent_name() {
+                Some(refname) => {
+                    // Extract branch name from refs/heads/branch_name
+                    let branch_name = refname.shorten();
+                    Ok(branch_name.to_string())
+                }
+                None => {
+                    // Detached HEAD state
+                    Ok("HEAD".to_string())
+                }
             }
         }
-        None => {
+        Err(_) => {
             // Repository has no HEAD (empty repository)
             Ok("(no branch)".to_string())
         }
     }
 }
 
-fn get_upstream_branch_name(repo: &Repository, head: Option<&git2::Reference>) -> Result<String> {
-    match head {
-        Some(head_ref) => {
-            let branch_name = head_ref.shorthand().context("Failed to get branch name")?;
+fn get_upstream_branch_name(repo: &Repository) -> Result<String> {
+    let head = repo.head()?;
+    let tracking_branch = head.into_remote(gix::remote::Direction::Fetch).transpose()?;
 
-            let branch = repo
-                .find_branch(branch_name, BranchType::Local)
-                .context("Failed to find local branch")?;
-
-            let upstream = branch.upstream().context("No upstream branch configured")?;
-
-            let upstream_name = upstream
-                .name()
-                .context("Failed to get upstream branch name")?
-                .context("Upstream branch name contains invalid UTF-8")?;
-
-            Ok(upstream_name.to_string())
-        }
-        None => {
-            Err(anyhow::anyhow!("No HEAD reference available"))
-        }
+    match tracking_branch {
+        Some(branch) => match branch.name() {
+            Some(name) => Ok(name.as_bstr().to_string()),
+            None => Err(anyhow::anyhow!("Upstream branch name is not valid UTF-8")),
+        },
+        None => Err(anyhow::anyhow!(
+            "No upstream branch configured for current branch"
+        )),
     }
 }
 
-fn get_changes_summary(repo: &Repository) -> Result<ChangesSummary> {
-    let mut opts = git2::StatusOptions::new();
-    opts.include_untracked(true)        // Show untracked files
-        .recurse_untracked_dirs(false)  // But don't scan inside untracked dirs
-        .include_ignored(false);
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum UntrackedArg {
+    No,
+    Normal,
+    All,
+}
 
-    let statuses = repo
-        .statuses(Some(&mut opts))
-        .context("Failed to get repository status")?;
-
+fn get_changes_summary(repo: &Repository, untracked: Option<UntrackedArg>, all: bool) -> Result<ChangesSummary> {
     let mut summary = ChangesSummary::default();
-
-    for entry in statuses.iter() {
-        let status = entry.status();
-
-        if status.contains(Status::INDEX_NEW) || status.contains(Status::WT_NEW) {
-            summary.added += 1;
+    
+    // Use git command to get proper staged vs unstaged distinction
+    let repo_path = repo.workdir().unwrap_or(repo.path());
+    let output = std::process::Command::new("git")
+        .current_dir(repo_path)
+        .args(&["status", "--porcelain"])
+        .output()
+        .context("Failed to execute git status")?;
+    
+    if !output.status.success() {
+        return Ok(summary);
+    }
+    
+    let status_output = String::from_utf8_lossy(&output.stdout);
+    
+    for line in status_output.lines() {
+        if line.len() < 2 {
+            continue;
         }
-        if status.contains(Status::INDEX_MODIFIED) || status.contains(Status::WT_MODIFIED) {
-            summary.modified += 1;
+        
+        let chars: Vec<char> = line.chars().collect();
+        let index_status = chars[0];
+        let worktree_status = chars[1];
+        
+        // Count staged changes (index status is not space or ?)
+        match index_status {
+            'A' | 'M' | 'D' | 'R' | 'C' => summary.staged += 1,
+            _ => {}
         }
-        if status.contains(Status::INDEX_DELETED) || status.contains(Status::WT_DELETED) {
-            summary.deleted += 1;
+        
+        // Count working directory changes
+        match worktree_status {
+            'M' => summary.modified += 1,
+            'D' => summary.deleted += 1,
+            _ => {}
         }
-        if status.contains(Status::INDEX_RENAMED) {
-            summary.renamed += 1;
-        }
-        if status.contains(Status::INDEX_TYPECHANGE) || status.contains(Status::WT_TYPECHANGE) {
-            summary.typechange += 1;
+        
+        // Count untracked files (both index and worktree status are ?)
+        if index_status == '?' && worktree_status == '?' {
+            let should_include_untracked = match untracked {
+                Some(UntrackedArg::No) => false,
+                Some(UntrackedArg::Normal) | Some(UntrackedArg::All) => true,
+                None => all,
+            };
+            
+            if should_include_untracked {
+                summary.untracked += 1;
+            }
         }
     }
 
@@ -220,26 +252,26 @@ mod tests {
     #[test]
     fn test_changes_summary_with_changes() {
         let summary = ChangesSummary {
-            added: 2,
+            staged: 0,
             modified: 1,
             deleted: 3,
             renamed: 0,
-            typechange: 0,
+            untracked: 0,
         };
         assert!(!summary.is_clean());
-        assert_eq!(summary.format(), "+2~1-3");
+        assert_eq!(summary.format(), "~1-3");
     }
 
     #[test]
     fn test_changes_summary_all_types() {
         let summary = ChangesSummary {
-            added: 1,
+            staged: 1,
             modified: 2,
             deleted: 3,
             renamed: 4,
-            typechange: 5,
+            untracked: 5,
         };
-        assert_eq!(summary.format(), "+1~2-3r4t5");
+        assert_eq!(summary.format(), "^1~4~2-3+5");
     }
 
     #[test]
@@ -279,13 +311,25 @@ mod tests {
             current_branch: "feature".to_string(),
             upstream_branch: Some("origin/feature".to_string()),
             changes: ChangesSummary {
-                added: 1,
+                staged: 0,
                 modified: 2,
                 deleted: 0,
                 renamed: 0,
-                typechange: 0,
+                untracked: 0,
             },
         };
-        assert_eq!(status.format(), "feature origin/feature +1~2");
+        assert_eq!(status.format(), "feature origin/feature ~2");
+    }
+
+    #[test]
+    fn test_changes_summary_one_modified_one_deleted() {
+        let summary = ChangesSummary {
+            staged: 0,
+            modified: 1,
+            deleted: 1,
+            renamed: 0,
+            untracked: 0,
+        };
+        assert_eq!(summary.format(), "~1-1");
     }
 }
