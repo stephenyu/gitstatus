@@ -119,25 +119,17 @@ impl ChangesSummary {
             return "✓".to_string();
         }
 
-        let mut parts = Vec::new();
-
-        if self.staged > 0 {
-            parts.push(format!("^{}", self.staged));
-        }
-        if self.renamed > 0 {
-            parts.push(format!("~{}", self.renamed));
-        }
-        if self.modified > 0 {
-            parts.push(format!("~{}", self.modified));
-        }
-        if self.deleted > 0 {
-            parts.push(format!("-{}", self.deleted));
-        }
-        if self.untracked > 0 {
-            parts.push(format!("+{}", self.untracked));
-        }
-
-        parts.join("")
+        [
+            (self.staged > 0).then(|| format!("^{}", self.staged)),
+            (self.renamed > 0).then(|| format!("~{}", self.renamed)),
+            (self.modified > 0).then(|| format!("~{}", self.modified)),
+            (self.deleted > 0).then(|| format!("-{}", self.deleted)),
+            (self.untracked > 0).then(|| format!("+{}", self.untracked)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("")
     }
 }
 
@@ -166,34 +158,26 @@ fn get_current_branch_name(repo: &Repository) -> Result<String> {
 fn get_upstream_branch_name(repo: &Repository) -> Result<String> {
     // Resolve current HEAD to obtain the local branch reference name
     let head = repo.head()?;
-    let local_ref_name = match head.referent_name() {
-        Some(name) => name,
-        None => {
-            // Detached or unborn HEAD: no upstream
-            return Err(anyhow::anyhow!(
-                "No upstream branch configured for current branch"
-            ));
-        }
+    let Some(local_ref_name) = head.referent_name() else {
+        // Detached or unborn HEAD: no upstream
+        return Err(anyhow::anyhow!(
+            "No upstream branch configured for current branch"
+        ));
     };
 
     // Determine the configured remote name for fetch operations, e.g., "origin"
-    let remote_name = match repo.branch_remote_name(local_ref_name.shorten(), gix::remote::Direction::Fetch) {
-        Some(name) => name.as_bstr().to_string(),
-        None => {
-            return Err(anyhow::anyhow!(
-                "No upstream branch configured for current branch"
-            ));
-        }
+    let Some(remote_name) = repo.branch_remote_name(local_ref_name.shorten(), gix::remote::Direction::Fetch) else {
+        return Err(anyhow::anyhow!(
+            "No upstream branch configured for current branch"
+        ));
     };
+    let remote_name = remote_name.as_bstr().to_string();
 
     // Determine the upstream branch ref name on the remote, e.g., "refs/heads/main"
-    let upstream_ref = match repo.branch_remote_ref_name(local_ref_name, gix::remote::Direction::Fetch) {
-        Some(Ok(name)) => name,
-        Some(Err(_)) | None => {
-            return Err(anyhow::anyhow!(
-                "No upstream branch configured for current branch"
-            ));
-        }
+    let Some(Ok(upstream_ref)) = repo.branch_remote_ref_name(local_ref_name, gix::remote::Direction::Fetch) else {
+        return Err(anyhow::anyhow!(
+            "No upstream branch configured for current branch"
+        ));
     };
 
     // Shorten to branch name like "main" from "refs/heads/main"
@@ -238,7 +222,10 @@ fn get_changes_summary(repo: &Repository, untracked: Option<UntrackedArg>, all: 
         Some(UntrackedArg::No) => UntrackedFiles::None,
         Some(UntrackedArg::Normal) => UntrackedFiles::Collapsed,
         Some(UntrackedArg::All) => UntrackedFiles::Files,
-        None => if all { UntrackedFiles::Files } else { UntrackedFiles::None },
+        None => match all {
+            true => UntrackedFiles::Files,
+            false => UntrackedFiles::None,
+        },
     };
 
     let mut platform = repo
