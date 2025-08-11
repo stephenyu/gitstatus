@@ -22,6 +22,8 @@ cargo install --path .
 
 ### Using Cargo
 
+If published to crates.io:
+
 ```bash
 cargo install gitstatus
 ```
@@ -46,11 +48,24 @@ gitstatus
 # Show help
 gitstatus --help
 
-# Specify a different repository path
+# Specify a different repository path (also accepts a positional path)
 gitstatus --path /path/to/repo
+gitstatus /path/to/repo
 
 # Show verbose error messages
 gitstatus --verbose
+
+# Show version
+gitstatus --version
+
+# Control untracked scanning (default: no)
+gitstatus -u no|normal|all   # --all is equivalent to -u all
+
+# Skip staged-change counting
+gitstatus --no-staged        # or -S
+
+# Read branch/upstream directly from .git (lower overhead, less robust)
+gitstatus --direct-upstream  # or -U
 ```
 
 ## Output Format
@@ -64,11 +79,15 @@ The output consists of three parts separated by spaces:
 ### Change Summary Symbols
 
 - `✓` - Clean working directory
-- `+N` - N added files
-- `~N` - N modified files  
-- `-N` - N deleted files
-- `rN` - N renamed files
-- `tN` - N files with type changes
+- `^N` - N staged changes (index differs from `HEAD^{tree}`)
+- `~N` - N renames/copies between index and worktree
+- `~N` - N modified/type-changed/conflict entries between index and worktree
+- `-N` - N deleted files (index vs worktree)
+- `+N` - N untracked files
+
+Notes:
+- The `~` symbol can appear twice: once for renames/copies and once for other modifications.
+- Additions that are staged are counted in `^N`; before staging, they appear as untracked `+N`.
 
 ## Examples
 
@@ -77,9 +96,9 @@ The output consists of three parts separated by spaces:
 $ gitstatus
 main origin/main ✓
 
-# Repository with changes
+# Repository with staged, renamed, modified, deleted and untracked changes
 $ gitstatus
-main origin/main +2~3-1
+main origin/main ^1~2~3-1+4
 
 # Detached HEAD state
 $ gitstatus
@@ -87,16 +106,16 @@ HEAD ✓
 
 # Branch without upstream
 $ gitstatus
-feature-branch +1
+feature-branch ✓
 ```
 
-## What's New in v0.3.0
+## What's New in v1.0.0
 
 This version represents a complete modernization of the codebase:
 
 ### 🚀 **Modern Rust Patterns**
 - **Better Error Handling**: Uses `anyhow` for context-rich error messages
-- **CLI Arguments**: Proper CLI parsing with `clap` derive macros
+- **Lightweight CLI**: Manual argument parsing for zero additional dependencies
 - **Type Safety**: Structured data types instead of string manipulation
 - **Memory Safety**: No more potential panics from string indexing
 
@@ -110,6 +129,9 @@ This version represents a complete modernization of the codebase:
 - **Fast default**: Avoid scanning untracked files by default (equivalent to `git -uno`)
 - **Parallel checks**: Uses `gix` parallel feature to check tracked-file modifications efficiently
 - **Minimal I/O**: No process spawning; tracked-only checks for prompt use are extremely fast
+- **New flags**:
+  - `--no-staged` (`-S`): skip staged-change counting when you want minimal status
+  - `--direct-upstream` (`-U`): read branch/upstream directly from `.git` for lowest overhead (may miss config layering/worktrees)
 
 ### 🛡️ **Reliability**
 - **Proper Error Propagation**: No more silent failures with `process::exit(1)`
@@ -117,10 +139,10 @@ This version represents a complete modernization of the codebase:
 - **Input Validation**: Validates repository paths and handles invalid UTF-8
 
 ### 🎯 **User Experience**
-- **Better Symbols**: More intuitive change indicators (`~` for modified vs `+` for added)
+- **Clear Output**: Compact summary with consistent symbols (`^`, `~`, `-`, `+`, `✓`)
 - **Verbose Mode**: Optional detailed error messages for debugging
 - **Flexible Paths**: Can check status of any repository, not just current directory
-- **Help System**: Proper help and version information
+- **Help/Version**: Built-in usage and `--version`
 
 ## How it’s fast (with gix)
 
@@ -132,6 +154,10 @@ By default, `gitstatus` is optimized for shell prompts and large repos:
   - default / `-u no`: no untracked scan (no dirwalk)
   - `-u normal`: collapsed untracked
   - `-u all` or `--all`: full untracked listing
+
+Additional flags affecting performance:
+- `--no-staged` (`-S`): disables staged diff computation (`HEAD^{tree}` vs index)
+- `--direct-upstream` (`-U`): avoids full config resolution by reading `.git/HEAD` and `.git/config` directly (less accurate in complex setups)
 - Submodule checks and rename tracking are disabled by default for speed; they can be enabled later if needed.
 
 ## Development
