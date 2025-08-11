@@ -1,38 +1,93 @@
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
+use std::env;
 use gix::diff::index::{Action, ChangeRef};
 use gix::progress;
 use gix::status::{self, index_worktree::iter::Summary as IterSummary, UntrackedFiles};
 use gix::Repository;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-#[derive(Parser)]
-#[command(
-    name = "gitstatus",
-    about = "Get concise git repository status information",
-    version
-)]
 struct Args {
-    /// Path to the git repository (defaults to current directory)
-    #[arg(short, long, default_value = ".")]
     path: String,
-
-    /// Show detailed output
-    #[arg(short, long)]
     verbose: bool,
-
-    /// Control untracked files handling (e.g., -uno == --untracked no)
-    /// Values: no | normal | all
-    #[arg(short = 'u', long = "untracked", value_enum)]
     untracked: Option<UntrackedArg>,
-
-    /// Show all files including untracked files (overrides default behavior)
-    #[arg(long)]
     all: bool,
+    no_staged: bool,
+    direct_upstream: bool,
+}
+
+fn parse_args() -> Args {
+    let mut path = ".".to_string();
+    let mut verbose = false;
+    let mut untracked: Option<UntrackedArg> = None;
+    let mut all = false;
+    let mut no_staged = false;
+    let mut direct_upstream = false;
+
+    let mut args = env::args().skip(1).peekable();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--version" => {
+                println!("{}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            "-p" | "--path" => {
+                if let Some(val) = args.next() {
+                    path = val;
+                } else {
+                    eprintln!("--path requires a value");
+                    std::process::exit(2);
+                }
+            }
+            "-v" | "--verbose" => {
+                verbose = true;
+            }
+            "-u" | "--untracked" => {
+                let val = args.next().unwrap_or_else(|| {
+                    eprintln!("--untracked requires one of: no|normal|all");
+                    std::process::exit(2);
+                });
+                untracked = match val.as_str() {
+                    "no" => Some(UntrackedArg::No),
+                    "normal" => Some(UntrackedArg::Normal),
+                    "all" => Some(UntrackedArg::All),
+                    _ => {
+                        eprintln!("Invalid value for --untracked: {}", val);
+                        std::process::exit(2);
+                    }
+                };
+            }
+            "--all" => {
+                all = true;
+            }
+            "-S" | "--no-staged" => { no_staged = true; }
+            "-U" | "--direct-upstream" => { direct_upstream = true; }
+            "-h" | "--help" => {
+                print_usage_and_exit(0);
+            }
+            _ if arg.starts_with('-') => {
+                eprintln!("Unknown option: {}", arg);
+                print_usage_and_exit(2);
+            }
+            other => {
+                // Positional path
+                path = other.to_string();
+            }
+        }
+    }
+
+    Args { path, verbose, untracked, all, no_staged, direct_upstream }
+}
+
+fn print_usage_and_exit(code: i32) -> ! {
+    eprintln!(
+        "gitstatus [--path <dir>] [--verbose] [-u no|normal|all] [--all] [--no-staged|-S] [--direct-upstream|-U] [--version]"
+    );
+    std::process::exit(code);
 }
 
 fn main() {
-    let args = Args::parse();
+    let args = parse_args();
 
     match run(&args) {
         Ok(output) => println!("{}", output),
@@ -48,7 +103,20 @@ fn main() {
 fn run(args: &Args) -> Result<String> {
     let repo = discover_repository(&args.path).context("Failed to find git repository")?;
 
-    let status = GitStatus::from_repository(&repo, args.untracked, args.all)?;
+    // Resolve branch/upstream either via direct reads or via gix
+    let (current_branch, upstream_branch) = if args.direct_upstream {
+        let (_worktree_root, git_dir) = find_repo_roots(Path::new(&args.path))?;
+        let current_branch = read_current_branch_fast(&git_dir)?;
+        let upstream_branch = read_upstream_branch_fast(&git_dir, &current_branch).ok();
+        (current_branch, upstream_branch)
+    } else {
+        let current_branch = get_current_branch_name(&repo)?;
+        let upstream_branch = get_upstream_branch_name(&repo).ok();
+        (current_branch, upstream_branch)
+    };
+
+    let changes = get_changes_summary(&repo, args.untracked, args.all, !args.no_staged)?;
+    let status = GitStatus { current_branch, upstream_branch, changes };
     Ok(status.format())
 }
 
@@ -76,7 +144,7 @@ impl GitStatus {
     fn from_repository(repo: &Repository, untracked: Option<UntrackedArg>, all: bool) -> Result<Self> {
         let current_branch = get_current_branch_name(repo)?;
         let upstream_branch = get_upstream_branch_name(repo).ok();
-        let changes = get_changes_summary(repo, untracked, all)?;
+        let changes = get_changes_summary(repo, untracked, all, true)?;
 
         Ok(GitStatus {
             current_branch,
@@ -203,34 +271,36 @@ fn get_upstream_branch_name(repo: &Repository) -> Result<String> {
     Ok(format!("{}/{}", remote_name, branch_only))
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
+#[derive(Copy, Clone, Debug)]
 enum UntrackedArg {
     No,
     Normal,
     All,
 }
 
-fn get_changes_summary(repo: &Repository, untracked: Option<UntrackedArg>, all: bool) -> Result<ChangesSummary> {
+fn get_changes_summary(repo: &Repository, untracked: Option<UntrackedArg>, all: bool, include_staged: bool) -> Result<ChangesSummary> {
     let mut summary = ChangesSummary::default();
 
-    // 1) Count staged changes: diff HEAD tree vs index
-    if let Ok(head_tree_id) = repo.head_tree_id() {
-        let worktree_index = repo.index_or_empty()?;
-        let _ = repo.tree_index_status::<anyhow::Error>(
-            &head_tree_id,
-            &worktree_index,
-            None,
-            status::tree_index::TrackRenames::Disabled,
-            |change, _tree_idx, _work_idx| {
-                match change {
-                    ChangeRef::Addition { .. } => summary.staged += 1,
-                    ChangeRef::Modification { .. } => summary.staged += 1,
-                    ChangeRef::Deletion { .. } => summary.staged += 1,
-                    ChangeRef::Rewrite { .. } => summary.staged += 1,
-                }
-                Ok(Action::Continue)
-            },
-        );
+    // 1) Optional: Count staged changes (HEAD tree vs index)
+    if include_staged {
+        if let Ok(head_tree_id) = repo.head_tree_id() {
+            let worktree_index = repo.index_or_empty()?;
+            let _ = repo.tree_index_status::<anyhow::Error>(
+                &head_tree_id,
+                &worktree_index,
+                None,
+                status::tree_index::TrackRenames::Disabled,
+                |change, _tree_idx, _work_idx| {
+                    match change {
+                        ChangeRef::Addition { .. } => summary.staged += 1,
+                        ChangeRef::Modification { .. } => summary.staged += 1,
+                        ChangeRef::Deletion { .. } => summary.staged += 1,
+                        ChangeRef::Rewrite { .. } => summary.staged += 1,
+                    }
+                    Ok(Action::Continue)
+                },
+            );
+        }
     }
 
     // 2) Count working tree changes: diff index vs worktree (tracked files only by default)
@@ -275,6 +345,89 @@ fn get_changes_summary(repo: &Repository, untracked: Option<UntrackedArg>, all: 
 
     Ok(summary)
 }
+
+// Ultra-fast path helpers: read branch and upstream directly from .git without loading repo config in gix
+
+fn find_repo_roots(start: &Path) -> Result<(PathBuf, PathBuf)> {
+    let mut cur = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    if cur.is_file() {
+        cur = cur.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    }
+    loop {
+        let dot_git = cur.join(".git");
+        if dot_git.is_dir() {
+            return Ok((cur.clone(), dot_git));
+        }
+        if dot_git.is_file() {
+            // read gitdir: path
+            let content = fs::read_to_string(&dot_git).context("Failed to read .git file")?;
+            let prefix = "gitdir:";
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix(prefix) {
+                    let gitdir = rest.trim();
+                    let gitdir_path = if Path::new(gitdir).is_absolute() {
+                        PathBuf::from(gitdir)
+                    } else {
+                        cur.join(gitdir)
+                    };
+                    return Ok((cur.clone(), gitdir_path));
+                }
+            }
+            anyhow::bail!("Invalid .git file: missing gitdir");
+        }
+        if !cur.pop() {
+            anyhow::bail!("Not a git repository");
+        }
+    }
+}
+
+fn read_current_branch_fast(git_dir: &Path) -> Result<String> {
+    let head_path = git_dir.join("HEAD");
+    let head = fs::read_to_string(&head_path).with_context(|| format!("Failed to read {}", head_path.display()))?;
+    if let Some(rest) = head.trim().strip_prefix("ref: ") {
+        // ref: refs/heads/branch
+        let branch = rest.rsplit('/').next().unwrap_or(rest).to_string();
+        Ok(branch)
+    } else {
+        Ok("HEAD".to_string())
+    }
+}
+
+fn read_upstream_branch_fast(git_dir: &Path, current_branch: &str) -> Result<String> {
+    if current_branch == "HEAD" || current_branch == "(no branch)" {
+        anyhow::bail!("No upstream for detached or unborn HEAD");
+    }
+    let config_path = git_dir.join("config");
+    let config = fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read {}", config_path.display()))?;
+
+    let mut in_section = false;
+    let mut remote: Option<String> = None;
+    let mut merge: Option<String> = None;
+    let section_header = format!("[branch \"{}\"]", current_branch);
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_section = line == section_header;
+            continue;
+        }
+        if !in_section || line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(val) = line.strip_prefix("remote =") {
+            remote = Some(val.trim().to_string());
+        } else if let Some(val) = line.strip_prefix("merge =") {
+            merge = Some(val.trim().to_string());
+        }
+    }
+
+    let remote = remote.ok_or_else(|| anyhow::anyhow!("No upstream branch configured"))?;
+    let merge = merge.ok_or_else(|| anyhow::anyhow!("No upstream branch configured"))?;
+    let short = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+    Ok(format!("{}/{}", remote, short))
+}
+
+// Server functionality removed for simplicity.
 
 #[cfg(test)]
 mod tests {
