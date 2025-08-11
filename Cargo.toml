@@ -5,7 +5,7 @@ edition = "2021"
 description = "Does one thing incredibly well: tells you your current branch, origin branch and the number of changes. Perfect for large repositories / monorepos"
 license = "GPL-3.0-only"
 repository = "https://github.com/stephenyu/gitstatus"
-rust-version = "1.70"
+rust-version = "1.89.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
