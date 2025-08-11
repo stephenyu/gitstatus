@@ -1,6 +1,6 @@
 [package]
 name = "gitstatus"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "Does one thing incredibly well: tells you your current branch, origin branch and the number of changes. Perfect for large repositories / monorepos"
 license = "GPL-3.0-only"
