@@ -1,9 +1,11 @@
+#![warn(clippy::all)]
+
 use anyhow::{Context, Result};
-use std::env;
 use gix::diff::index::{Action, ChangeRef};
 use gix::progress;
 use gix::status::{self, index_worktree::iter::Summary as IterSummary, UntrackedFiles};
 use gix::Repository;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -60,8 +62,12 @@ fn parse_args() -> Args {
             "--all" => {
                 all = true;
             }
-            "-S" | "--no-staged" => { no_staged = true; }
-            "-U" | "--direct-upstream" => { direct_upstream = true; }
+            "-S" | "--no-staged" => {
+                no_staged = true;
+            }
+            "-U" | "--direct-upstream" => {
+                direct_upstream = true;
+            }
             "-h" | "--help" => {
                 print_usage_and_exit(0);
             }
@@ -76,7 +82,14 @@ fn parse_args() -> Args {
         }
     }
 
-    Args { path, verbose, untracked, all, no_staged, direct_upstream }
+    Args {
+        path,
+        verbose,
+        untracked,
+        all,
+        no_staged,
+        direct_upstream,
+    }
 }
 
 fn print_usage_and_exit(code: i32) -> ! {
@@ -116,7 +129,11 @@ fn run(args: &Args) -> Result<String> {
     };
 
     let changes = get_changes_summary(&repo, args.untracked, args.all, !args.no_staged)?;
-    let status = GitStatus { current_branch, upstream_branch, changes };
+    let status = GitStatus {
+        current_branch,
+        upstream_branch,
+        changes,
+    };
     Ok(status.format())
 }
 
@@ -141,18 +158,6 @@ struct ChangesSummary {
 }
 
 impl GitStatus {
-    fn from_repository(repo: &Repository, untracked: Option<UntrackedArg>, all: bool) -> Result<Self> {
-        let current_branch = get_current_branch_name(repo)?;
-        let upstream_branch = get_upstream_branch_name(repo).ok();
-        let changes = get_changes_summary(repo, untracked, all, true)?;
-
-        Ok(GitStatus {
-            current_branch,
-            upstream_branch,
-            changes,
-        })
-    }
-
     fn format(&self) -> String {
         let mut components = Vec::new();
 
@@ -234,7 +239,9 @@ fn get_upstream_branch_name(repo: &Repository) -> Result<String> {
     };
 
     // Determine the configured remote name for fetch operations, e.g., "origin"
-    let Some(remote_name) = repo.branch_remote_name(local_ref_name.shorten(), gix::remote::Direction::Fetch) else {
+    let Some(remote_name) =
+        repo.branch_remote_name(local_ref_name.shorten(), gix::remote::Direction::Fetch)
+    else {
         return Err(anyhow::anyhow!(
             "No upstream branch configured for current branch"
         ));
@@ -242,7 +249,9 @@ fn get_upstream_branch_name(repo: &Repository) -> Result<String> {
     let remote_name = remote_name.as_bstr().to_string();
 
     // Determine the upstream branch ref name on the remote, e.g., "refs/heads/main"
-    let Some(Ok(upstream_ref)) = repo.branch_remote_ref_name(local_ref_name, gix::remote::Direction::Fetch) else {
+    let Some(Ok(upstream_ref)) =
+        repo.branch_remote_ref_name(local_ref_name, gix::remote::Direction::Fetch)
+    else {
         return Err(anyhow::anyhow!(
             "No upstream branch configured for current branch"
         ));
@@ -250,7 +259,9 @@ fn get_upstream_branch_name(repo: &Repository) -> Result<String> {
 
     // Shorten to branch name like "main" from "refs/heads/main"
     let short_upstream = upstream_ref.shorten().to_string();
-    let branch_only = short_upstream.strip_prefix("heads/").unwrap_or(&short_upstream);
+    let branch_only = short_upstream
+        .strip_prefix("heads/")
+        .unwrap_or(&short_upstream);
 
     Ok(format!("{}/{}", remote_name, branch_only))
 }
@@ -262,7 +273,12 @@ enum UntrackedArg {
     All,
 }
 
-fn get_changes_summary(repo: &Repository, untracked: Option<UntrackedArg>, all: bool, include_staged: bool) -> Result<ChangesSummary> {
+fn get_changes_summary(
+    repo: &Repository,
+    untracked: Option<UntrackedArg>,
+    all: bool,
+    include_staged: bool,
+) -> Result<ChangesSummary> {
     let mut summary = ChangesSummary::default();
 
     // 1) Optional: Count staged changes (HEAD tree vs index)
@@ -311,15 +327,15 @@ fn get_changes_summary(repo: &Repository, untracked: Option<UntrackedArg>, all: 
         other => platform.untracked_files(other),
     };
 
-    let mut iter = platform.into_index_worktree_iter(Vec::new())?;
-    while let Some(item_res) = iter.next() {
+    let iter = platform.into_index_worktree_iter(Vec::new())?;
+    for item_res in iter {
         let Ok(item) = item_res else { break };
         match item.summary() {
             Some(IterSummary::Added) => summary.untracked += 1,
             Some(IterSummary::Removed) => summary.deleted += 1,
-            Some(IterSummary::Modified) | Some(IterSummary::TypeChange) | Some(IterSummary::Conflict) => {
-                summary.modified += 1
-            }
+            Some(IterSummary::Modified)
+            | Some(IterSummary::TypeChange)
+            | Some(IterSummary::Conflict) => summary.modified += 1,
             Some(IterSummary::Renamed) => summary.renamed += 1,
             Some(IterSummary::Copied) => {
                 // Treat copies similar to renames for summary purposes
@@ -370,7 +386,8 @@ fn find_repo_roots(start: &Path) -> Result<(PathBuf, PathBuf)> {
 
 fn read_current_branch_fast(git_dir: &Path) -> Result<String> {
     let head_path = git_dir.join("HEAD");
-    let head = fs::read_to_string(&head_path).with_context(|| format!("Failed to read {}", head_path.display()))?;
+    let head = fs::read_to_string(&head_path)
+        .with_context(|| format!("Failed to read {}", head_path.display()))?;
     if let Some(rest) = head.trim().strip_prefix("ref: ") {
         // ref: refs/heads/branch
         let branch = rest.rsplit('/').next().unwrap_or(rest).to_string();
